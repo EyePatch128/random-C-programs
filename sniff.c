@@ -12,8 +12,8 @@ void usage(){
 
 int main(int argc, char **argv){
 
-        char *local_ip_p = "192.168.1.27";
-        char *local_mac_p = "60:35:C0:61:C1:B0";
+        char *local_ip_p = "192.168.1.27"; // Local IP
+        char *local_mac_p = "LOCAL MAC ADDRESS";
         uint32_t local_ip;                      // Local IP address
         uint8_t *local_mac;                     // local MAC address
         int A_length;
